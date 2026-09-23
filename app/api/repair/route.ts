@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { put, del } from "@vercel/blob";
+import { put, del, get } from "@vercel/blob";
 
 import pool from "@/lib/db";
 import { getSessionFromRequest } from "@/lib/auth";
@@ -9,7 +9,7 @@ import type { RowDataPacket, ResultSetHeader } from "mysql2";
 export const runtime = "nodejs";
 
 /* =========================================================
-   TYPES — ตรงกับคอลัมน์ใน db/schema.sql
+   TYPES
 ========================================================= */
 
 type RepairRow = RowDataPacket & {
@@ -76,7 +76,9 @@ type RequestBody = {
 ========================================================= */
 
 function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error) {
+    return error.message;
+  }
 
   if (
     typeof error === "object" &&
@@ -194,7 +196,9 @@ function normalizePriority(
 function toISOStringOrNull(
   value: Date | string | null
 ) {
-  if (!value) return null;
+  if (!value) {
+    return null;
+  }
 
   const date = new Date(value);
 
@@ -206,14 +210,64 @@ function toISOStringOrNull(
 }
 
 /* =========================================================
-   FORMAT ROW -> ให้ตรงกับทุกหน้าที่ใช้
+   BLOB HELPERS
+========================================================= */
+
+/**
+ * ดึง pathname จาก Vercel Blob URL
+ *
+ * ตัวอย่าง:
+ * https://xxxxx.private.blob.vercel-storage.com/repair/file.png
+ *
+ * จะได้:
+ * repair/file.png
+ */
+function getBlobPathFromUrl(
+  blobUrl: string
+): string | null {
+  try {
+    const url = new URL(blobUrl);
+
+    const pathname = decodeURIComponent(
+      url.pathname.replace(/^\/+/, "")
+    );
+
+    return pathname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ตรวจว่า URL เป็น Vercel Blob หรือไม่
+ */
+function isVercelBlobUrl(
+  value: string
+): boolean {
+  try {
+    const url = new URL(value);
+
+    return (
+      url.hostname.endsWith(
+        ".blob.vercel-storage.com"
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+/* =========================================================
+   FORMAT ROW
 ========================================================= */
 
 function formatRepair(item: RepairRow) {
-  const requestId = String(item.request_id);
+  const requestId =
+    String(item.request_id);
 
   return {
     id: item.request_id,
+
     requestId,
     request_id: requestId,
 
@@ -258,9 +312,14 @@ function formatRepair(item: RepairRow) {
         ? String(item.technician_id)
         : null,
 
-    resolutionText: item.resolution_text,
-    resolution_text: item.resolution_text,
-    repairResult: item.resolution_text,
+    resolutionText:
+      item.resolution_text,
+
+    resolution_text:
+      item.resolution_text,
+
+    repairResult:
+      item.resolution_text,
 
     repairCost:
       item.repair_cost !== null
@@ -272,23 +331,77 @@ function formatRepair(item: RepairRow) {
         ? Number(item.repair_cost)
         : null,
 
-    imageName: item.image_name,
-    image_name: item.image_name,
+    imageName:
+      item.image_name,
 
-    // ตอนนี้ imagePath จะเป็น URL ของ Vercel Blob
-    imagePath: item.image_path,
-    image_path: item.image_path,
+    image_name:
+      item.image_name,
 
-    createdAt: toISOStringOrNull(item.created_at),
-    acceptedAt: toISOStringOrNull(item.accepted_at),
-    assignedAt: toISOStringOrNull(item.accepted_at),
-    startedAt: toISOStringOrNull(item.started_at),
-    completedAt: toISOStringOrNull(item.completed_at),
-    closedAt: toISOStringOrNull(item.closed_at),
+    /*
+     * imagePath คือ URL ของ Blob
+     *
+     * เนื่องจากเป็น Private Blob
+     * ห้ามนำ URL นี้ไปเปิดตรงจาก Browser
+     *
+     * ให้ใช้:
+     *
+     * /api/repair/image?requestId=xxx
+     *
+     * สำหรับแสดงรูป
+     */
+    imagePath:
+      item.image_path,
+
+    image_path:
+      item.image_path,
+
+    /*
+     * URL สำหรับหน้าเว็บใช้แสดงรูป
+     *
+     * จะชี้กลับมายัง API ที่ตรวจ Session
+     */
+    imageUrl:
+      item.image_path
+        ? `/api/repair/image?requestId=${encodeURIComponent(
+            requestId
+          )}`
+        : null,
+
+    createdAt:
+      toISOStringOrNull(
+        item.created_at
+      ),
+
+    acceptedAt:
+      toISOStringOrNull(
+        item.accepted_at
+      ),
+
+    assignedAt:
+      toISOStringOrNull(
+        item.accepted_at
+      ),
+
+    startedAt:
+      toISOStringOrNull(
+        item.started_at
+      ),
+
+    completedAt:
+      toISOStringOrNull(
+        item.completed_at
+      ),
+
+    closedAt:
+      toISOStringOrNull(
+        item.closed_at
+      ),
 
     cancelledAt:
       item.status === "cancel"
-        ? toISOStringOrNull(item.closed_at)
+        ? toISOStringOrNull(
+            item.closed_at
+          )
         : null,
   };
 }
@@ -322,24 +435,35 @@ const SELECT_COLUMNS = `
 
 /* =========================================================
    GET
-   /api/repair?id=&email=&userId=&technicianId=
+   /api/repair
 ========================================================= */
 
-export async function GET(req: Request) {
+export async function GET(
+  req: Request
+) {
   try {
-    const url = new URL(req.url);
+    const url =
+      new URL(req.url);
 
     const id =
-      url.searchParams.get("id")?.trim() ?? "";
+      url.searchParams
+        .get("id")
+        ?.trim() ?? "";
 
     const email =
-      url.searchParams.get("email")?.trim() ?? "";
+      url.searchParams
+        .get("email")
+        ?.trim() ?? "";
 
     const queryUserId =
-      url.searchParams.get("userId")?.trim() ?? "";
+      url.searchParams
+        .get("userId")
+        ?.trim() ?? "";
 
     const technicianId =
-      url.searchParams.get("technicianId")?.trim() ?? "";
+      url.searchParams
+        .get("technicianId")
+        ?.trim() ?? "";
 
     let sql = `
       SELECT ${SELECT_COLUMNS}
@@ -349,20 +473,29 @@ export async function GET(req: Request) {
     const params: unknown[] = [];
 
     if (id) {
-      sql += " WHERE request_id = ?";
+      sql +=
+        " WHERE request_id = ?";
+
       params.push(id);
     } else if (email) {
-      sql += " WHERE email = ?";
+      sql +=
+        " WHERE email = ?";
+
       params.push(email);
     } else if (technicianId) {
-      sql += " WHERE technician_id = ?";
+      sql +=
+        " WHERE technician_id = ?";
+
       params.push(technicianId);
     } else if (queryUserId) {
-      sql += " WHERE user_id = ?";
+      sql +=
+        " WHERE user_id = ?";
+
       params.push(queryUserId);
     }
 
-    sql += " ORDER BY created_at DESC";
+    sql +=
+      " ORDER BY created_at DESC";
 
     const [rows] =
       await pool.query<RepairRow[]>(
@@ -370,7 +503,8 @@ export async function GET(req: Request) {
         params
       );
 
-    const repairs = rows.map(formatRepair);
+    const repairs =
+      rows.map(formatRepair);
 
     return NextResponse.json({
       success: true,
@@ -379,7 +513,8 @@ export async function GET(req: Request) {
       count: repairs.length,
     });
   } catch (error) {
-    const message = getErrorMessage(error);
+    const message =
+      getErrorMessage(error);
 
     console.error(
       "REPAIR GET ERROR:",
@@ -403,26 +538,30 @@ export async function GET(req: Request) {
 /* =========================================================
    POST
    /api/repair
+
    multipart/form-data
 
-   เปลี่ยนระบบ Upload:
-   เดิม -> public/uploads/repair
-   ใหม่ -> Vercel Blob
+   Upload:
+   Local filesystem
+   ↓
+   Vercel Private Blob
 ========================================================= */
 
-export async function POST(req: Request) {
+export async function POST(
+  req: Request
+) {
   /*
-   * เก็บ URL ของ Blob ไว้สำหรับกรณี:
-   * Upload สำเร็จ
-   * แต่ INSERT Database ล้มเหลว
-   *
-   * จากนั้นจะพยายามลบ Blob ที่สร้างไว้
+   * ถ้า Upload สำเร็จ
+   * แต่ Database INSERT ล้มเหลว
+   * จะใช้ URL นี้สำหรับ cleanup
    */
-  let uploadedBlobUrl: string | null = null;
+  let uploadedBlobUrl:
+    | string
+    | null = null;
 
   try {
     /* =====================================================
-       ตรวจสอบ Session
+       SESSION
     ===================================================== */
 
     const session =
@@ -442,7 +581,9 @@ export async function POST(req: Request) {
     }
 
     const userId =
-      toIdString(session.userId);
+      toIdString(
+        session.userId
+      );
 
     if (!userId) {
       return NextResponse.json(
@@ -458,7 +599,7 @@ export async function POST(req: Request) {
     }
 
     /* =====================================================
-       รับ FormData
+       FORM DATA
     ===================================================== */
 
     const formData =
@@ -466,67 +607,95 @@ export async function POST(req: Request) {
 
     const prefix =
       String(
-        formData.get("prefix") ?? ""
+        formData.get(
+          "prefix"
+        ) ?? ""
       ).trim();
 
     const fname =
       String(
-        formData.get("fname") ?? ""
+        formData.get(
+          "fname"
+        ) ?? ""
       ).trim();
 
     const lname =
       String(
-        formData.get("lname") ?? ""
+        formData.get(
+          "lname"
+        ) ?? ""
       ).trim();
 
     const email =
       String(
-        formData.get("email") ??
+        formData.get(
+          "email"
+        ) ??
           session.email ??
           ""
       ).trim();
 
     const category =
       String(
-        formData.get("category") ?? ""
+        formData.get(
+          "category"
+        ) ?? ""
       ).trim();
 
     const equipment =
       String(
-        formData.get("equipment") ?? ""
+        formData.get(
+          "equipment"
+        ) ?? ""
       ).trim();
 
     const location =
       String(
-        formData.get("location") ?? ""
+        formData.get(
+          "location"
+        ) ?? ""
       ).trim();
 
     const subject =
       String(
-        formData.get("subject") ??
-          formData.get("title") ??
+        formData.get(
+          "subject"
+        ) ??
+          formData.get(
+            "title"
+          ) ??
           ""
       ).trim();
 
     const detail =
       String(
-        formData.get("detail") ??
-          formData.get("problemDescription") ??
-          formData.get("problem_description") ??
+        formData.get(
+          "detail"
+        ) ??
+          formData.get(
+            "problemDescription"
+          ) ??
+          formData.get(
+            "problem_description"
+          ) ??
           ""
       ).trim();
 
     const priority =
       normalizePriority(
-        formData.get("priority")
+        formData.get(
+          "priority"
+        )
       );
 
     /* =====================================================
-       ตรวจสอบผู้ใช้
+       CHECK USER
     ===================================================== */
 
     const [userRows] =
-      await pool.query<RowDataPacket[]>(
+      await pool.query<
+        RowDataPacket[]
+      >(
         `
         SELECT user_id
         FROM users
@@ -536,12 +705,9 @@ export async function POST(req: Request) {
         [userId]
       );
 
-    if (userRows.length === 0) {
-      console.error(
-        "USER ID NOT FOUND:",
-        userId
-      );
-
+    if (
+      userRows.length === 0
+    ) {
       return NextResponse.json(
         {
           success: false,
@@ -556,7 +722,7 @@ export async function POST(req: Request) {
     }
 
     /* =====================================================
-       ตรวจสอบข้อมูลจำเป็น
+       VALIDATION
     ===================================================== */
 
     if (!category) {
@@ -625,19 +791,24 @@ export async function POST(req: Request) {
     }
 
     /* =====================================================
-       เลขที่แจ้งซ่อม
+       REPAIR NUMBER
     ===================================================== */
 
     const repairNo =
       `HD-${Date.now()}`;
 
     /* =====================================================
-       รูปภาพแนบ
-       Vercel Blob
+       IMAGE
+       VERCEL PRIVATE BLOB
     ===================================================== */
 
-    let imageName: string | null = null;
-    let imagePath: string | null = null;
+    let imageName:
+      | string
+      | null = null;
+
+    let imagePath:
+      | string
+      | null = null;
 
     const image =
       formData.get("image");
@@ -647,7 +818,7 @@ export async function POST(req: Request) {
       image.size > 0
     ) {
       /* ===================================================
-         ประเภทไฟล์ที่อนุญาต
+         ALLOWED TYPE
       =================================================== */
 
       const allowedTypes = [
@@ -675,7 +846,7 @@ export async function POST(req: Request) {
       }
 
       /* ===================================================
-         ขนาดไฟล์สูงสุด 5 MB
+         MAX 5 MB
       =================================================== */
 
       if (
@@ -695,7 +866,7 @@ export async function POST(req: Request) {
       }
 
       /* ===================================================
-         สร้างชื่อไฟล์
+         FILE EXTENSION
       =================================================== */
 
       const extension =
@@ -709,11 +880,10 @@ export async function POST(req: Request) {
         `${repairNo}-${Date.now()}.${extension}`;
 
       /* ===================================================
-         Upload ไป Vercel Blob
+         UPLOAD PRIVATE BLOB
 
-         ตัวอย่าง Path:
-
-         repair/HD-1234567890-1234567891.png
+         สำคัญ:
+         access ต้องเป็น private
       =================================================== */
 
       const blob =
@@ -721,14 +891,11 @@ export async function POST(req: Request) {
           `repair/${imageName}`,
           image,
           {
-            access: "public",
-            contentType: image.type,
+            access: "private",
+            contentType:
+              image.type,
           }
         );
-
-      /* ===================================================
-         เก็บ URL ของ Blob
-      =================================================== */
 
       uploadedBlobUrl =
         blob.url;
@@ -737,7 +904,7 @@ export async function POST(req: Request) {
         blob.url;
 
       console.log(
-        "✅ REPAIR IMAGE UPLOAD SUCCESS:",
+        "REPAIR PRIVATE BLOB UPLOAD SUCCESS:",
         {
           imageName,
           imagePath,
@@ -746,7 +913,7 @@ export async function POST(req: Request) {
     }
 
     /* =====================================================
-       บันทึกข้อมูลลง Database
+       INSERT DATABASE
     ===================================================== */
 
     const [result] =
@@ -796,7 +963,7 @@ export async function POST(req: Request) {
       );
 
     console.log(
-      "✅ REPAIR INSERT SUCCESS",
+      "REPAIR INSERT SUCCESS:",
       {
         requestId,
         repairNo,
@@ -805,7 +972,7 @@ export async function POST(req: Request) {
     );
 
     /* =====================================================
-       Response
+       RESPONSE
     ===================================================== */
 
     return NextResponse.json(
@@ -826,11 +993,30 @@ export async function POST(req: Request) {
 
         imagePath,
 
+        /*
+         * URL ที่หน้าเว็บใช้แสดงรูป
+         *
+         * ไม่เปิด Blob URL โดยตรง
+         */
+        imageUrl:
+          imagePath
+            ? `/api/repair/image?requestId=${encodeURIComponent(
+                requestId
+              )}`
+            : null,
+
         data: {
           requestId,
           repairNo,
           imageName,
           imagePath,
+
+          imageUrl:
+            imagePath
+              ? `/api/repair/image?requestId=${encodeURIComponent(
+                  requestId
+                )}`
+              : null,
         },
       },
       {
@@ -839,9 +1025,7 @@ export async function POST(req: Request) {
     );
   } catch (error) {
     /* =====================================================
-       ถ้า Upload Blob สำเร็จ
-       แต่ Database INSERT ล้มเหลว
-       ให้พยายามลบ Blob ที่สร้างไว้
+       CLEANUP BLOB
     ===================================================== */
 
     if (uploadedBlobUrl) {
@@ -885,73 +1069,248 @@ export async function POST(req: Request) {
 }
 
 /* =========================================================
-   ตรวจสอบและอัปเดตช่างเทคนิค
-   ใช้ร่วมกันใน PUT/PATCH
+   IMAGE
+   /api/repair/image?requestId=123
+
+   สำหรับเปิดรูป Private Blob
+
+   Browser
+      ↓
+   API
+      ↓
+   ตรวจ Session
+      ↓
+   ตรวจสิทธิ์
+      ↓
+   Vercel Private Blob
+      ↓
+   Stream รูปกลับ Browser
 ========================================================= */
 
-async function resolveTechnicianId(
-  technicianValue: unknown
-):
-  Promise<
-    | {
-        ok: true;
-        technicianId: string | null;
-      }
-    | {
-        ok: false;
-        message: string;
-      }
-  > {
-  if (
-    technicianValue === undefined ||
-    technicianValue === null ||
-    technicianValue === ""
-  ) {
-    return {
-      ok: true,
-      technicianId: null,
-    };
-  }
+export async function imageGET(
+  req: Request
+) {
+  try {
+    /* =====================================================
+       SESSION
+    ===================================================== */
 
-  const technicianId =
-    toIdString(
-      technicianValue
+    const session =
+      getSessionFromRequest(req);
+
+    if (!session) {
+      return new Response(
+        "กรุณาเข้าสู่ระบบก่อนดูรูปภาพ",
+        {
+          status: 401,
+        }
+      );
+    }
+
+    const url =
+      new URL(req.url);
+
+    const requestId =
+      url.searchParams
+        .get("requestId")
+        ?.trim() ?? "";
+
+    if (!requestId) {
+      return new Response(
+        "ไม่พบรหัสรายการแจ้งซ่อม",
+        {
+          status: 400,
+        }
+      );
+    }
+
+    /* =====================================================
+       GET REPAIR
+    ===================================================== */
+
+    const [rows] =
+      await pool.query<
+        RepairRow[]
+      >(
+        `
+        SELECT
+          request_id,
+          repair_no,
+          user_id,
+          technician_id,
+          image_path
+        FROM repair_requests
+        WHERE request_id = ?
+        LIMIT 1
+        `,
+        [requestId]
+      );
+
+    const repair =
+      rows[0];
+
+    if (!repair) {
+      return new Response(
+        "ไม่พบรายการแจ้งซ่อม",
+        {
+          status: 404,
+        }
+      );
+    }
+
+    if (!repair.image_path) {
+      return new Response(
+        "รายการนี้ไม่มีรูปภาพ",
+        {
+          status: 404,
+        }
+      );
+    }
+
+    /* =====================================================
+       ตรวจว่าเป็น Vercel Blob URL
+    ===================================================== */
+
+    if (
+      !isVercelBlobUrl(
+        repair.image_path
+      )
+    ) {
+      return new Response(
+        "รูปภาพไม่ได้อยู่ใน Vercel Blob",
+        {
+          status: 404,
+        }
+      );
+    }
+
+    /* =====================================================
+       CHECK PERMISSION
+
+       เจ้าของ Ticket:
+       ดูได้
+
+       technician:
+       ดูได้
+
+       admin:
+       ดูได้
+    ===================================================== */
+
+    const sessionUserId =
+      toIdString(
+        session.userId
+      );
+
+    const ownerUserId =
+      String(
+        repair.user_id
+      );
+
+    const sessionRole =
+      String(
+        session.role ?? ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const isOwner =
+      sessionUserId ===
+      ownerUserId;
+
+    const isTechnician =
+      sessionRole ===
+      "technician";
+
+    const isAdmin =
+      sessionRole ===
+        "admin" ||
+      sessionRole ===
+        "administrator";
+
+    if (
+      !isOwner &&
+      !isTechnician &&
+      !isAdmin
+    ) {
+      return new Response(
+        "ไม่มีสิทธิ์เข้าถึงรูปภาพนี้",
+        {
+          status: 403,
+        }
+      );
+    }
+
+    /* =====================================================
+       GET PRIVATE BLOB
+    ===================================================== */
+
+    const pathname =
+      getBlobPathFromUrl(
+        repair.image_path
+      );
+
+    if (!pathname) {
+      return new Response(
+        "ไม่สามารถอ่านตำแหน่งไฟล์ได้",
+        {
+          status: 500,
+        }
+      );
+    }
+
+    const blob =
+      await get(
+        pathname,
+        {
+          access: "private",
+        }
+      );
+
+    if (!blob) {
+      return new Response(
+        "ไม่พบไฟล์รูปภาพใน Blob",
+        {
+          status: 404,
+        }
+      );
+    }
+
+    /* =====================================================
+       RETURN IMAGE STREAM
+    ===================================================== */
+
+    return new Response(
+      blob.stream,
+      {
+        status: 200,
+
+        headers: {
+          "Content-Type":
+            blob.blob.contentType ||
+            "application/octet-stream",
+
+          "Cache-Control":
+            "private, max-age=300",
+
+          "Content-Disposition":
+            "inline",
+        },
+      }
+    );
+  } catch (error) {
+    console.error(
+      "REPAIR IMAGE GET ERROR:",
+      error
     );
 
-  if (!technicianId) {
-    return {
-      ok: false,
-      message:
-        "ไม่พบรหัสช่าง",
-    };
-  }
-
-  const [technicianRows] =
-    await pool.query<RowDataPacket[]>(
-      `
-      SELECT user_id
-      FROM users
-      WHERE user_id = ?
-        AND role = 'technician'
-      LIMIT 1
-      `,
-      [technicianId]
+    return new Response(
+      "ไม่สามารถเปิดรูปภาพได้",
+      {
+        status: 500,
+      }
     );
-
-  if (
-    technicianRows.length === 0
-  ) {
-    return {
-      ok: false,
-      message:
-        "ไม่พบช่างที่ระบุ",
-    };
   }
-
-  return {
-    ok: true,
-    technicianId,
-  };
 }
 
 /* =========================================================
@@ -1006,7 +1365,9 @@ export async function PUT(
       (await req.json()) as RequestBody;
 
     const [existingRows] =
-      await pool.query<RepairRow[]>(
+      await pool.query<
+        RepairRow[]
+      >(
         `
         SELECT ${SELECT_COLUMNS}
         FROM repair_requests
@@ -1038,7 +1399,7 @@ export async function PUT(
     const values: unknown[] = [];
 
     /* =====================================================
-       Subject
+       SUBJECT
     ===================================================== */
 
     const subject =
@@ -1058,7 +1419,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       Detail
+       DETAIL
     ===================================================== */
 
     const detail =
@@ -1079,7 +1440,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       Category
+       CATEGORY
     ===================================================== */
 
     if (
@@ -1097,7 +1458,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       Equipment
+       EQUIPMENT
     ===================================================== */
 
     if (
@@ -1115,7 +1476,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       Location
+       LOCATION
     ===================================================== */
 
     if (
@@ -1133,7 +1494,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       Priority
+       PRIORITY
     ===================================================== */
 
     if (
@@ -1151,12 +1512,14 @@ export async function PUT(
     }
 
     /* =====================================================
-       Resolution
+       RESOLUTION
     ===================================================== */
 
     if (
-      body.resolutionText !== undefined ||
-      body.resolution_text !== undefined
+      body.resolutionText !==
+        undefined ||
+      body.resolution_text !==
+        undefined
     ) {
       fields.push(
         "resolution_text = ?"
@@ -1172,12 +1535,14 @@ export async function PUT(
     }
 
     /* =====================================================
-       Repair Cost
+       REPAIR COST
     ===================================================== */
 
     if (
-      body.repairCost !== undefined ||
-      body.repair_cost !== undefined
+      body.repairCost !==
+        undefined ||
+      body.repair_cost !==
+        undefined
     ) {
       fields.push(
         "repair_cost = ?"
@@ -1192,7 +1557,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       Technician
+       TECHNICIAN
     ===================================================== */
 
     const technicianValue =
@@ -1202,7 +1567,8 @@ export async function PUT(
       body.assigned_to;
 
     if (
-      technicianValue !== undefined &&
+      technicianValue !==
+        undefined &&
       technicianValue !== null &&
       technicianValue !== ""
     ) {
@@ -1236,9 +1602,12 @@ export async function PUT(
         "accepted_at = COALESCE(accepted_at, NOW())"
       );
     } else if (
-      existing.technician_id === null &&
-      session.role === "technician" &&
-      body.status !== undefined
+      existing.technician_id ===
+        null &&
+      session.role ===
+        "technician" &&
+      body.status !==
+        undefined
     ) {
       fields.push(
         "technician_id = ?"
@@ -1254,7 +1623,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       Status
+       STATUS
     ===================================================== */
 
     if (
@@ -1301,7 +1670,7 @@ export async function PUT(
     }
 
     /* =====================================================
-       ไม่มีข้อมูลแก้ไข
+       NO UPDATE
     ===================================================== */
 
     if (
@@ -1425,7 +1794,9 @@ export async function PATCH(
     }
 
     const [existingRows] =
-      await pool.query<RepairRow[]>(
+      await pool.query<
+        RepairRow[]
+      >(
         `
         SELECT ${SELECT_COLUMNS}
         FROM repair_requests
@@ -1468,7 +1839,7 @@ export async function PATCH(
     ];
 
     /* =====================================================
-       Technician
+       TECHNICIAN
     ===================================================== */
 
     const technicianValue =
@@ -1478,7 +1849,8 @@ export async function PATCH(
       body.assigned_to;
 
     if (
-      technicianValue !== undefined &&
+      technicianValue !==
+        undefined &&
       technicianValue !== null &&
       technicianValue !== ""
     ) {
@@ -1512,8 +1884,10 @@ export async function PATCH(
         "accepted_at = COALESCE(accepted_at, NOW())"
       );
     } else if (
-      existing.technician_id === null &&
-      session.role === "technician"
+      existing.technician_id ===
+        null &&
+      session.role ===
+        "technician"
     ) {
       fields.push(
         "technician_id = ?"
@@ -1529,12 +1903,14 @@ export async function PATCH(
     }
 
     /* =====================================================
-       Resolution
+       RESOLUTION
     ===================================================== */
 
     if (
-      body.resolutionText !== undefined ||
-      body.resolution_text !== undefined
+      body.resolutionText !==
+        undefined ||
+      body.resolution_text !==
+        undefined
     ) {
       fields.push(
         "resolution_text = ?"
@@ -1550,12 +1926,14 @@ export async function PATCH(
     }
 
     /* =====================================================
-       Repair Cost
+       REPAIR COST
     ===================================================== */
 
     if (
-      body.repairCost !== undefined ||
-      body.repair_cost !== undefined
+      body.repairCost !==
+        undefined ||
+      body.repair_cost !==
+        undefined
     ) {
       fields.push(
         "repair_cost = ?"
@@ -1570,7 +1948,7 @@ export async function PATCH(
     }
 
     /* =====================================================
-       Status timestamps
+       TIMESTAMPS
     ===================================================== */
 
     if (
@@ -1666,6 +2044,10 @@ export async function PATCH(
 /* =========================================================
    DELETE
    /api/repair?id=
+
+   ลบ:
+   1. Database
+   2. Private Blob
 ========================================================= */
 
 export async function DELETE(
@@ -1710,12 +2092,13 @@ export async function DELETE(
     }
 
     /* =====================================================
-       ดึงข้อมูลรายการก่อนลบ
-       รวม image_path เพื่อใช้ลบ Blob
+       GET REPAIR
     ===================================================== */
 
     const [rows] =
-      await pool.query<RepairRow[]>(
+      await pool.query<
+        RepairRow[]
+      >(
         `
         SELECT
           request_id,
@@ -1745,7 +2128,7 @@ export async function DELETE(
     }
 
     /* =====================================================
-       ลบข้อมูลจาก Database
+       DELETE DATABASE
     ===================================================== */
 
     const [result] =
@@ -1775,25 +2158,29 @@ export async function DELETE(
     }
 
     /* =====================================================
-       ลบรูปจาก Vercel Blob
-
-       ถ้ามี image_path
+       DELETE PRIVATE BLOB
     ===================================================== */
 
-    if (repair.image_path) {
+    if (
+      repair.image_path &&
+      isVercelBlobUrl(
+        repair.image_path
+      )
+    ) {
       try {
         await del(
           repair.image_path
         );
 
         console.log(
-          "✅ REPAIR IMAGE DELETE SUCCESS:",
+          "REPAIR PRIVATE BLOB DELETE SUCCESS:",
           repair.image_path
         );
       } catch (blobError) {
         /*
-         * ไม่ให้การลบรูปที่ล้มเหลว
-         * ทำให้การลบ Ticket ล้มเหลว
+         * Ticket ถูกลบแล้ว
+         * ถ้าลบ Blob ไม่สำเร็จ
+         * ไม่ทำให้ Ticket กลับมา
          */
         console.error(
           "REPAIR BLOB DELETE ERROR:",
@@ -1837,4 +2224,78 @@ export async function DELETE(
       }
     );
   }
+}
+
+/* =========================================================
+   TECHNICIAN HELPER
+========================================================= */
+
+async function resolveTechnicianId(
+  technicianValue: unknown
+):
+  Promise<
+    | {
+        ok: true;
+        technicianId:
+          | string
+          | null;
+      }
+    | {
+        ok: false;
+        message: string;
+      }
+  > {
+  if (
+    technicianValue ===
+      undefined ||
+    technicianValue === null ||
+    technicianValue === ""
+  ) {
+    return {
+      ok: true,
+      technicianId: null,
+    };
+  }
+
+  const technicianId =
+    toIdString(
+      technicianValue
+    );
+
+  if (!technicianId) {
+    return {
+      ok: false,
+      message:
+        "ไม่พบรหัสช่าง",
+    };
+  }
+
+  const [technicianRows] =
+    await pool.query<
+      RowDataPacket[]
+    >(
+      `
+      SELECT user_id
+      FROM users
+      WHERE user_id = ?
+        AND role = 'technician'
+      LIMIT 1
+      `,
+      [technicianId]
+    );
+
+  if (
+    technicianRows.length === 0
+  ) {
+    return {
+      ok: false,
+      message:
+        "ไม่พบช่างที่ระบุ",
+    };
+  }
+
+  return {
+    ok: true,
+    technicianId,
+  };
 }
